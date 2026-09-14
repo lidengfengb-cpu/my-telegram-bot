@@ -447,8 +447,21 @@ async function handleWebhook(request, ctx) {
 async function onMessage(message) {
   // /start 命令
   if (message.text === '/start') {
+    const chatId = message.chat.id.toString();
+    const verified = await db.isVerified(chatId);
+
+    if (verified) {
+      // ✅ 已验证用户：不再展示验证引导
+      return sendMessage({
+        chat_id: chatId,
+        text: '<b>👋 欢迎回来！</b>你已通过验证，直接发送消息即可和我对话～',
+        parse_mode: 'HTML'
+      });
+    }
+
+    // 未验证用户：展示验证引导
     return sendMessage({
-      chat_id: message.chat.id,
+      chat_id: chatId,
       text: '<b>👋 你好，欢迎来访！</b>\n\n为过滤广告机器人，请先完成一道简单的数学验证题，通过后你的消息就会直接转达给我。\n\n<i>直接发送任意消息即可开始验证～</i>',
       parse_mode: 'HTML'
     });
