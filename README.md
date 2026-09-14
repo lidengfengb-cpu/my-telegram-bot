@@ -1,4 +1,4 @@
-# Telegram-verify-bot
+# my-telegram-bot
 
 一个基于 Cloudflare Workers 的 Telegram 消息转发机器人，集成了数学验证、反欺诈和用户管理功能。支持 KV 版本和 D1 版本。
 
