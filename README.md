@@ -670,7 +670,7 @@ telegram-verify-bot/
 
 ## 📜 许可证
 
-本项目参考 [NFD](https://github.com/LloydAsp/nfd)，致谢原项目作者。
+
 
 ---
 
@@ -688,8 +688,6 @@ telegram-verify-bot/
 
 有问题或建议？
 
-- 📮 提交 Issue
-- 💭 开启讨论区
-- 🔗 提交 Pull Request
+
 
 ⭐ 如果对你有帮助，请给个 Star！
