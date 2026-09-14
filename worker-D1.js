@@ -120,8 +120,8 @@ function generateMathProblem() {
 let TOKEN, WEBHOOK, SECRET, ADMIN_UID, db;
 
 const NOTIFY_INTERVAL = 24 * 3600 * 1000;  // ⏱️ 24小时通知间隔
-const fraudDb = 'https://raw.githubusercontent.com/lidengfengb-cpu/telegram-verify-bot/main/data/fraud.db';
-const notificationUrl = 'https://raw.githubusercontent.com/lidengfengb-cpu/telegram-verify-bot/main/data/notification.txt';
+const fraudDb = 'https://raw.githubusercontent.com/lidengfengb-cpu/my-telegram-bot/main/data/fraud.db';
+const notificationUrl = 'https://raw.githubusercontent.com/lidengfengb-cpu/my-telegram-bot/main/data/notification.txt';
 const enable_notification = false;  // 🔕 通知功能开关（false=关闭，改为 true 后超间隔会提醒管理员）
 const FRAUD_CACHE_TTL = 600000;     // ⏱️ 诈骗名单缓存时长：10 分钟
 const MAX_VERIFY_ATTEMPTS = 3;  // 🔢 最多尝试3次（防止脚本穷举6个按钮）
