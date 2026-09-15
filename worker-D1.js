@@ -1,8 +1,14 @@
 /**
- * 生成简单数学验证题（当前使用）
- * 加法/减法/乘法/除法随机四则运算，答案控制在 0-99 内，真人一眼就能算出
+ * 生成验证题（当前使用）
+ * 随机从两种题型中出一种：四则运算 / emoji 计数，真人一眼就能看懂。
+ * 两者都返回 { question, answer }，answer 统一为两位数字字符串，兼容选项与校验逻辑。
  */
 function generateMathProblem() {
+  // 50% 概率出 emoji 计数题，50% 出四则运算题
+  if (Math.random() < 0.5) {
+    return generateEmojiCountProblem();
+  }
+
   const ops = ['+', '-', '*', '/'];
   const op = ops[Math.floor(Math.random() * ops.length)];
 
@@ -46,6 +52,45 @@ function generateMathProblem() {
   return {
     question: question,
     answer: String(result).padStart(2, '0')
+  };
+}
+
+/**
+ * 生成 emoji 计数题
+ * 一行 5~8 个混合 emoji，目标是数出其中某一种的数量（1~4 个），真人一眼即可数清。
+ */
+function generateEmojiCountProblem() {
+  // 可用 emoji 池，保证字符宽度接近、视觉整齐
+  const emojiPool = ['🍎', '🍌', '🍊', '🍇', '🍒', '🍓'];
+  
+  // 随机选一种作为"目标 emoji"
+  const target = emojiPool[Math.floor(Math.random() * emojiPool.length)];
+  // 目标的出现次数控制在 1~4（真实好数）
+  const targetCount = Math.floor(Math.random() * 4) + 1;
+  // 总共 5~8 个
+  const total = 5 + Math.floor(Math.random() * 4);
+  // 干扰种类（从剩余 emoji 中随机再挑 1~2 种，让区分度适中）
+  const distractors = emojiPool
+    .filter(e => e !== target)
+    .sort(() => Math.random() - 0.5)
+    .slice(0, 1 + Math.floor(Math.random() * 2));
+
+  // 组装：先放 targetCount 个目标，再随机补满到 total 个干扰项，最后洗牌打乱位置
+  const items = [];
+  for (let i = 0; i < targetCount; i++) items.push(target);
+  while (items.length < total) {
+    items.push(distractors[Math.floor(Math.random() * distractors.length)]);
+  }
+  items.sort(() => Math.random() - 0.5);
+
+  // 两行展示，避免一行过长
+  const rowLen = Math.ceil(items.length / 2);
+  const emojiRow1 = items.slice(0, rowLen).join(' ');
+  const emojiRow2 = items.slice(rowLen).join(' ');
+
+  return {
+    question: `${emojiRow1}\n${emojiRow2}\n\n这些 emoji 里有多少个 ${target}？`,
+    answer: String(targetCount).padStart(2, '0')
   };
 }
 
