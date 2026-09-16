@@ -93,14 +93,14 @@ let lan = env.lan;
 
 | 存储键 | 说明 |
 |------|------|
-| whitelist-{userId} | 白名单标记 |
-| verify-{userId} | 当前验证码答案 |
-| verify-attempts-{userId} | 验证尝试次数 |
-| verified-{userId} | 验证成功标记（3天过期） |
-| isblocked-{userId} | 屏蔽标记（管理员手动 /block，永久） |
-| cooldown-{userId} | 验证冷却期截止时间（答错3次后 2 分钟，过期自动失效） |
+| whitelist-{chatId} | 白名单标记 |
+| verify-{chatId} | 当前验证码答案 |
+| verify-attempts-{chatId} | 验证尝试次数 |
+| verified-{chatId} | 验证成功标记（3天过期） |
+| isblocked-{chatId} | 屏蔽标记（管理员手动 /block，永久） |
+| cooldown-{chatId} | 验证冷却期截止时间（答错3次后 2 分钟，过期自动失效） |
 | msg-map-{messageId} | 消息映射关系 |
-| lastmsg-{userId} | 上次消息时间戳 |
+| lastmsg-{chatId} | 上次消息时间戳 |
 | whitelist-data | 白名单数据集合 |
 
 
