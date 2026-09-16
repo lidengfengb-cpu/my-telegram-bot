@@ -1,13 +1,14 @@
 /**
- * 生成时间基础的数学验证题
- * 使用 Intl.DateTimeFormat 获取指定时区的时间
- * 随机选取时间中的两位数字，各加上一个随机值，超过10取个位数
- */
-/**
- * 生成简单数学验证题（当前使用）
- * 加法/减法/乘法/除法随机四则运算，答案控制在 0-99 内，真人一眼就能算出
+ * 生成验证题（当前使用）
+ * 随机从两种题型中出一种：四则运算 / emoji 计数，真人一眼就能看懂。
+ * 两者都返回 { question, answer }，answer 统一为两位数字字符串，兼容选项与校验逻辑。
  */
 function generateMathProblem() {
+  // 50% 概率出 emoji 计数题，50% 出四则运算题
+  if (Math.random() < 0.5) {
+    return generateEmojiCountProblem();
+  }
+
   const ops = ['+', '-', '*', '/'];
   const op = ops[Math.floor(Math.random() * ops.length)];
 
@@ -51,6 +52,45 @@ function generateMathProblem() {
   return {
     question: question,
     answer: String(result).padStart(2, '0')
+  };
+}
+
+/**
+ * 生成 emoji 计数题
+ * 一行 5~8 个混合 emoji，目标是数出其中某一种的数量（1~4 个），真人一眼即可数清。
+ */
+function generateEmojiCountProblem() {
+  // 可用 emoji 池，保证字符宽度接近、视觉整齐
+  const emojiPool = ['🍎', '🍌', '🍊', '🍇', '🍒', '🍓'];
+  
+  // 随机选一种作为"目标 emoji"
+  const target = emojiPool[Math.floor(Math.random() * emojiPool.length)];
+  // 目标的出现次数控制在 1~4（真实好数）
+  const targetCount = Math.floor(Math.random() * 4) + 1;
+  // 总共 5~8 个
+  const total = 5 + Math.floor(Math.random() * 4);
+  // 干扰种类（从剩余 emoji 中随机再挑 1~2 种，让区分度适中）
+  const distractors = emojiPool
+    .filter(e => e !== target)
+    .sort(() => Math.random() - 0.5)
+    .slice(0, 1 + Math.floor(Math.random() * 2));
+
+  // 组装：先放 targetCount 个目标，再随机补满到 total 个干扰项，最后洗牌打乱位置
+  const items = [];
+  for (let i = 0; i < targetCount; i++) items.push(target);
+  while (items.length < total) {
+    items.push(distractors[Math.floor(Math.random() * distractors.length)]);
+  }
+  items.sort(() => Math.random() - 0.5);
+
+  // 两行展示，避免一行过长
+  const rowLen = Math.ceil(items.length / 2);
+  const emojiRow1 = items.slice(0, rowLen).join(' ');
+  const emojiRow2 = items.slice(rowLen).join(' ');
+
+  return {
+    question: `${emojiRow1}\n${emojiRow2}\n\n这些 emoji 里有多少个 ${target}？`,
+    answer: String(targetCount).padStart(2, '0')
   };
 }
 
@@ -113,7 +153,7 @@ function generateMathProblem() {
   
   return { 
     question: question, 
-    answer: answer
+    answer: answer 
   };
 }
  ============================================================ */
@@ -126,15 +166,12 @@ let TOKEN, WEBHOOK, SECRET, ADMIN_UID, lan;
 const NOTIFY_INTERVAL = 24 * 3600 * 1000;  // ⏱️ 24小时通知间隔
 const fraudDb = 'https://raw.githubusercontent.com/lidengfengb-cpu/my-telegram-bot/main/data/fraud.db';
 const notificationUrl = 'https://raw.githubusercontent.com/lidengfengb-cpu/my-telegram-bot/main/data/notification.txt';
-const enable_notification = false;
+const enable_notification = false;  // 🔕 通知功能开关（false=关闭，改为 true 后超间隔会提醒管理员）
+const FRAUD_CACHE_TTL = 600000;     // ⏱️ 诈骗名单缓存时长：10 分钟
 const MAX_VERIFY_ATTEMPTS = 3;  // 🔢 最多尝试3次（防止脚本穷举6个按钮）
+const BLOCK_COOLDOWN_MS = 2 * 60 * 1000;  // ⏱️ 答错3次后的冷却时间：2 分钟（冷却结束后可重新验证）
 const VERIFICATION_TTL = 300;  // ⏱️ 验证码过期时间：5分钟（300秒）
 const VERIFIED_TTL = 259200;  // ⏱️ 验证成功有效期：3天（259200秒）
-
-// ✨ 新增：时区和验证算法配置
-const VERIFY_ADD_VALUE_MIN = 1;      // 随机加值最小范围
-const VERIFY_ADD_VALUE_MAX = 9;      // 随机加值最大范围
-let TIMEZONE;  // 动态配置，从环境变量读取
 
 /**
  * 处理请求的主入口（用于 Service Worker）
@@ -145,11 +182,20 @@ function initConfig(env) {
   ADMIN_UID = env.ADMIN_UID;
   WEBHOOK = '/endpoint';
   lan = env.lan;
-  TIMEZONE = env.TIMEZONE || 'UTC';  // ✨ 新增：读取时区配置，默认 UTC
   
   if (!TOKEN || !SECRET || !ADMIN_UID) {
     throw new Error('❌ 环境变量未配置: BOT_TOKEN, BOT_SECRET, ADMIN_UID');
   }
+}
+
+/**
+ * 校验是否为管理员发起的接口请求（复用 BOT_SECRET 作为管理口令）
+ * 支持两种传参方式：URL 查询参数 ?token=xxx，或请求头 X-Admin-Token: xxx
+ */
+function isAdminRequest(request) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get('token') || request.headers.get('X-Admin-Token');
+  return token === SECRET;
 }
 
 /**
@@ -213,11 +259,11 @@ export default {
     const url = new URL(request.url);
     
     if (url.pathname === WEBHOOK) {
-      return handleWebhook(request);
+      return handleWebhook(request, ctx);
     } else if (url.pathname === '/registerWebhook') {
-      return registerWebhook(request, url, WEBHOOK, SECRET);
+      return isAdminRequest(request) ? registerWebhook(url) : new Response('Unauthorized', { status: 403 });
     } else if (url.pathname === '/unRegisterWebhook') {
-      return unRegisterWebhook(request);
+      return isAdminRequest(request) ? unRegisterWebhook() : new Response('Unauthorized', { status: 403 });
     } else {
       return new Response('No handler for this request', { status: 404 });
     }
@@ -227,15 +273,53 @@ export default {
 /**
  * 处理 Webhook
  */
-async function handleWebhook(request) {
+let commandsPromise = null;
+
+/**
+ * 注册 bot 命令菜单（输入框左侧点 "/" 可见）。
+ * 这样用户点击即可发送 /start，无需手动输入。
+ */
+function ensureBotCommands() {
+  if (commandsPromise) return commandsPromise;
+
+  // 普通用户命令菜单：输入框左侧点 "/" 只显示 start
+  const setUserCommands = requestTelegram('setMyCommands', makeReqBody({
+    commands: [
+      { command: 'start', description: '开始使用 / 重新验证' }
+    ]
+  }));
+
+  // 管理员专属命令菜单：scope 限定为管理员（ADMIN_UID）单独生效
+  const setAdminCommands = requestTelegram('setMyCommands', makeReqBody({
+    commands: [
+      { command: 'start', description: '开始使用 / 重新验证' },
+      { command: 'block', description: '屏蔽用户 (可带 UID)' },
+      { command: 'unblock', description: '解除屏蔽 (可带 UID)' },
+      { command: 'checkblock', description: '查询屏蔽状态 (可带 UID)' },
+      { command: 'addwhite', description: '添加白名单 (可带 UID)' },
+      { command: 'removewhite', description: '移除白名单 (可带 UID)' },
+      { command: 'checkwhite', description: '查询白名单 (可带 UID)' },
+      { command: 'listwhite', description: '列出所有白名单' }
+    ],
+    scope: { type: 'chat', chat_id: parseInt(ADMIN_UID) }
+  }));
+
+  commandsPromise = Promise.all([setUserCommands, setAdminCommands]).catch(err => {
+    console.error('注册 bot 命令菜单失败:', err);
+    commandsPromise = null; // 失败后允许下次重试
+  });
+  return commandsPromise;
+}
+
+async function handleWebhook(request, ctx) {
   if (request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== SECRET) {
     return new Response('Unauthorized', { status: 403 });
   }
   
   try {
     const update = await request.json();
-    // 异步处理，不阻塞响应
-    await onUpdate(update);
+    ctx.waitUntil(ensureBotCommands());       // 异步注册命令菜单，不影响响应
+    ctx.waitUntil(onUpdate(update));
     return new Response('Ok');
   } catch (err) {
     console.error('❌ 处理 Webhook 错误:', err);
@@ -258,30 +342,44 @@ async function isWhitelisted(userId) {
 async function onMessage(message) {
   // /start 命令
   if (message.text === '/start') {
+    const chatId = message.chat.id.toString();
+    const verified = await lan.get('verified-' + chatId);
+
+    if (verified) {
+      // ✅ 已验证用户：不再展示验证引导
+      return sendMessage({
+        chat_id: chatId,
+        text: '<b>👋 欢迎回来！</b>你已通过验证，直接发送消息即可和我对话～',
+        parse_mode: 'HTML'
+      });
+    }
+
+    // 未验证用户：展示验证引导
     return sendMessage({
-      chat_id: message.chat.id,
-      text: '👋 你好，欢迎来访！为过滤广告机器人，请先完成验证。直接发送任意消息即可开始～'
+      chat_id: chatId,
+      text: '<b>👋 你好，欢迎来访！</b>\n\n为过滤广告机器人，请先完成一道简单的数学验证题，通过后你的消息就会直接转达给我。\n\n<i>直接发送任意消息即可开始验证～</i>',
+      parse_mode: 'HTML'
     });
   }
 
   // 管理员命令
   if (message.chat.id.toString() === ADMIN_UID) {
-    // ✅ 修复：添加到白名单
+    // ✅ 添加到白名单
     if (/^\/addwhite(?:\s+(\d+))?$/.test(message.text)) {
       return handleAddWhitelist(message);
     }
     
-    // ✅ 修复：从白名单移除
+    // ✅ 从白名单移除
     if (/^\/removewhite(?:\s+(\d+))?$/.test(message.text)) {
       return handleRemoveWhitelist(message);
     }
     
-    // ✅ 修复：检查白名单状态
+    // ✅ 检查白名单状态
     if (/^\/checkwhite(?:\s+(\d+))?$/.test(message.text)) {
       return handleCheckWhitelist(message);
     }
     
-    // ✅ 修复：列出所有白名单
+    // ✅ 列出所有白名单
     if (/^\/listwhite$/.test(message.text)) {
       return handleListWhitelist(message);
     }
@@ -291,25 +389,28 @@ async function onMessage(message) {
       return handleUnBlock(message);
     }
 
+    // ✅ 屏蔽用户：支持直接带 UID，也可回复转发的消息
+    if (/^\/block(?:\s+(\d+))?$/.test(message.text)) {
+      return handleBlock(message);
+    }
+
+    // ✅ 检查屏蔽状态：支持直接带 UID，也可回复转发的消息
+    if (/^\/checkblock(?:\s+(\d+))?$/.test(message.text)) {
+      return checkBlock(message);
+    }
+
     if (!message?.reply_to_message?.chat) {
       return sendMessage({
         chat_id: ADMIN_UID,
         text: '使用方法，回复转发的消息，并发送回复消息，或指令:\n' +
-              '/block - 屏蔽用户\n' +
+              '/block [UID] - 屏蔽用户\n' +
               '/unblock [UID] - 解除屏蔽\n' +
-              '/checkblock - 检查屏蔽状态\n' +
+              '/checkblock [UID] - 检查屏蔽状态\n' +
               '/addwhite [UID] - 添加到白名单\n' +
               '/removewhite [UID] - 从白名单移除\n' +
               '/checkwhite [UID] - 检查白名单状态\n' +
               '/listwhite - 列出所有白名单用户'
       });
-    }
-
-    if (/^\/block$/.test(message.text)) {
-      return handleBlock(message);
-    }
-    if (/^\/checkblock$/.test(message.text)) {
-      return checkBlock(message);
     }
 
     const guestChatId = await lan.get('msg-map-' + message?.reply_to_message.message_id);
@@ -443,44 +544,59 @@ async function handleListWhitelist(message) {
  */
 async function onCallbackQuery(callbackQuery) {
   try {
-    const userId = callbackQuery.from.id.toString();
+    // 统一使用 chatId 作为 KV 键维度，与 onMessage / sendVerification 保持一致
+    const chatId = callbackQuery.message.chat.id.toString();
     const data = callbackQuery.data;
     const messageId = callbackQuery.message.message_id;
 
-    // 格式: verify_{answer}_{correctAnswer}
+    // 格式: verify_{用户选择的选项值}
     if (!data.startsWith('verify_')) {
       return;
     }
 
-    const [, userAnswer, correctAnswer] = data.split('_');
+    const userAnswer = data.replace(/^verify_/, '');
 
-    if (userAnswer === correctAnswer) {
-      await lan.put('verified-' + userId, 'true', { expirationTtl: VERIFIED_TTL });  // ✅ 3天有效期
-      await lan.delete('verify-' + userId);
-      await lan.delete('verify-attempts-' + userId);
+    // 从 KV 读取当前验证题的正确答案（答案不暴露在按钮数据里）
+    const expected = await lan.get('verify-' + chatId);
+    if (!expected) {
+      await requestTelegram('answerCallbackQuery', makeReqBody({
+        callback_query_id: callbackQuery.id,
+        text: '⏳ 验证题已过期，请重新发一条消息获取新题',
+        show_alert: true
+      }));
+      return;
+    }
+
+    if (userAnswer === expected) {
+      await lan.put('verified-' + chatId, 'true', { expirationTtl: VERIFIED_TTL });  // ✅ 3天有效期
+      await lan.delete('verify-' + chatId);
+      await lan.delete('verify-attempts-' + chatId);
       
       await requestTelegram('editMessageText', makeReqBody({
-        chat_id: userId,
+        chat_id: chatId,
         message_id: messageId,
         text: '🎉🎊✨ 验证成功！你现在可以正常和我对话啦～',
         reply_markup: undefined
       }));
     } else {
-      // ✅ 新增：记录尝试次数
-      const attempts = parseInt(await lan.get('verify-attempts-' + userId) || '0') + 1;
+      // 记录尝试次数
+      const attempts = parseInt(await lan.get('verify-attempts-' + chatId) || '0') + 1;
       
       if (attempts >= MAX_VERIFY_ATTEMPTS) {
-        await lan.delete('verify-' + userId);
-        await lan.put('isblocked-' + userId, 'true');
+        // ✅ 答错次数超标：进入 2 分钟冷却，而非永久屏蔽；冷却结束后可重新验证
+        await lan.delete('verify-' + chatId);
+        await lan.delete('verify-attempts-' + chatId);
+        await lan.put('cooldown-' + chatId, String(Date.now() + BLOCK_COOLDOWN_MS), { expirationTtl: Math.ceil(BLOCK_COOLDOWN_MS / 1000) });
+        
         await requestTelegram('editMessageText', makeReqBody({
-          chat_id: userId,
+          chat_id: chatId,
           message_id: messageId,
-          text: '🚫🔥 验证失败次数过多，已拉黑移除～',
+          text: '🚫🔥 验证失败次数过多，请 2 分钟后再试～',
           reply_markup: undefined
         }));
       } else {
         // ✅ 答错后不保留旧题，原地换一道新题（只保留最新）；尝试次数继续累计
-        await sendVerification(userId, attempts, messageId);
+        await sendVerification(chatId, attempts, messageId);
         await requestTelegram('answerCallbackQuery', makeReqBody({
           callback_query_id: callbackQuery.id,
           text: `❌ 回答错误 (${attempts}/${MAX_VERIFY_ATTEMPTS})，请重新作答`,
@@ -534,12 +650,23 @@ async function handleGuestMessage(message) {
       return;
     }
 
-    // 检查是否被屏蔽
+    // 检查是否被屏蔽（永久）
     const isblocked = await lan.get('isblocked-' + chatId);
     if (isblocked === 'true') {
       return sendMessage({
         chat_id: chatId,
-        text: 'You are blocked'
+        text: '⛔ 你已被屏蔽，无法继续使用。如有疑问请联系管理员。'
+      });
+    }
+
+    // 检查是否处于验证冷却期（答错3次后 2 分钟内）
+    const cooldownUntil = parseInt(await lan.get('cooldown-' + chatId) || '0');
+    const cooldownRemaining = cooldownUntil - Date.now();
+    if (cooldownRemaining > 0) {
+      const secLeft = Math.ceil(cooldownRemaining / 1000);
+      return sendMessage({
+        chat_id: chatId,
+        text: `⏳ 你验证失败次数过多，请在 ${secLeft} 秒后再试～`
       });
     }
 
@@ -555,7 +682,7 @@ async function handleGuestMessage(message) {
         // ✨ 已有进行中的验证，提示用户继续答题
         return sendMessage({
           chat_id: chatId,
-          text: '请点击上面的按钮选择答案'
+          text: '⏳ 你已有一道未完成的验证题，请在最近的验证消息里选择答案作答～'
         });
       }
     }
@@ -602,14 +729,14 @@ async function sendVerification(chatId, attempts, editMessageId) {
   const keyboard = {
     inline_keyboard: [
       [
-        { text: `${colors[0]} ${formattedOptions[0]}`, callback_data: `verify_${formattedOptions[0]}_${answer}` },
-        { text: `${colors[1]} ${formattedOptions[1]}`, callback_data: `verify_${formattedOptions[1]}_${answer}` },
-        { text: `${colors[2]} ${formattedOptions[2]}`, callback_data: `verify_${formattedOptions[2]}_${answer}` }
+        { text: `${colors[0]} ${formattedOptions[0]}`, callback_data: `verify_${formattedOptions[0]}` },
+        { text: `${colors[1]} ${formattedOptions[1]}`, callback_data: `verify_${formattedOptions[1]}` },
+        { text: `${colors[2]} ${formattedOptions[2]}`, callback_data: `verify_${formattedOptions[2]}` }
       ],
       [
-        { text: `${colors[3]} ${formattedOptions[3]}`, callback_data: `verify_${formattedOptions[3]}_${answer}` },
-        { text: `${colors[4]} ${formattedOptions[4]}`, callback_data: `verify_${formattedOptions[4]}_${answer}` },
-        { text: `${colors[5]} ${formattedOptions[5]}`, callback_data: `verify_${formattedOptions[5]}_${answer}` }
+        { text: `${colors[3]} ${formattedOptions[3]}`, callback_data: `verify_${formattedOptions[3]}` },
+        { text: `${colors[4]} ${formattedOptions[4]}`, callback_data: `verify_${formattedOptions[4]}` },
+        { text: `${colors[5]} ${formattedOptions[5]}`, callback_data: `verify_${formattedOptions[5]}` }
       ]
     ]
   };
@@ -661,15 +788,6 @@ function generateOptions(correctAnswer) {
  */
 async function handleNotify(message, chatId) {
   try {
-    // 检查是否在诈骗名单中
-    if (await isFraud(chatId)) {
-      return sendMessage({
-        chat_id: ADMIN_UID,
-        text: `检测到骗子，UID: ${chatId}`
-      });
-    }
-
-    // 根据时间间隔提醒
     if (enable_notification) {
       const lastMsgTime = parseInt(await lan.get('lastmsg-' + chatId) || '0');
       if (!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL) {  // ⏱️ 24小时检查
@@ -691,12 +809,12 @@ async function handleNotify(message, chatId) {
  */
 async function handleBlock(message) {
   try {
-    const guestChatId = await lan.get('msg-map-' + message.reply_to_message.message_id);
+    const guestChatId = await getTargetUserId(message);
 
     if (!guestChatId) {
       return sendMessage({
         chat_id: ADMIN_UID,
-        text: '❌ 无法获取用户ID'
+        text: '❌ 用法: /block <UID> 或回复一条转发的消息'
       });
     }
 
@@ -746,12 +864,12 @@ async function handleUnBlock(message) {
  */
 async function checkBlock(message) {
   try {
-    const guestChatId = await lan.get('msg-map-' + message.reply_to_message.message_id);
+    const guestChatId = await getTargetUserId(message);
 
     if (!guestChatId) {
       return sendMessage({
         chat_id: ADMIN_UID,
-        text: '❌ 无法获取用户ID'
+        text: '❌ 用法: /checkblock <UID> 或回复一条转发的消息'
       });
     }
 
@@ -769,12 +887,18 @@ async function checkBlock(message) {
 /**
  * 检查是否是诈骗人员
  */
+let fraudCache = null;
+let fraudCacheTime = 0;
+
 async function isFraud(id) {
   try {
-    id = id.toString();
-    const db = await fetch(fraudDb).then(r => r.text());
-    const arr = db.split('\n').filter(v => v.trim());
-    return arr.some(v => v.trim() === id);
+    const now = Date.now();
+    if (!fraudCache || now - fraudCacheTime > FRAUD_CACHE_TTL) {
+      const db_list = await fetch(fraudDb).then(r => r.text());
+      fraudCache = db_list.split('\n').filter(v => v.trim());
+      fraudCacheTime = now;
+    }
+    return fraudCache.some(v => v.trim() === id.toString());
   } catch (err) {
     console.error('检查诈骗列表错误:', err);
     return false;
@@ -784,10 +908,19 @@ async function isFraud(id) {
 /**
  * 注册 Webhook
  */
-async function registerWebhook(event, requestUrl, suffix, secret) {
+async function registerWebhook(requestUrl) {
   try {
-    const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${suffix}`;
-    const r = await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: secret })).then(r => r.json());
+    const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${WEBHOOK}`;
+    const r = await fetch(apiUrl('setWebhook'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        url: webhookUrl,
+        secret_token: SECRET,
+        allowed_updates: ['message', 'callback_query']
+      })
+    }).then(r => r.json());
+    
     return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2));
   } catch (err) {
     console.error('注册 Webhook 错误:', err);
@@ -798,9 +931,14 @@ async function registerWebhook(event, requestUrl, suffix, secret) {
 /**
  * 注销 Webhook
  */
-async function unRegisterWebhook(event) {
+async function unRegisterWebhook() {
   try {
-    const r = await fetch(apiUrl('setWebhook', { url: '' })).then(r => r.json());
+    const r = await fetch(apiUrl('setWebhook'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: '' })
+    }).then(r => r.json());
+    
     return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2));
   } catch (err) {
     console.error('注销 Webhook 错误:', err);
