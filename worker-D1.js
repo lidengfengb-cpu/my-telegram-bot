@@ -240,7 +240,7 @@ class Database {
     // ✨ 改进：直接在 SQL 中过滤过期数据，更高效
     const result = await this.d1.prepare(
       'SELECT answer, attempts, created_at FROM verification WHERE user_id = ? AND created_at > ?'
-    ).bind(userId.toString(), Date.now() - 300000).first();
+    ).bind(userId.toString(), Date.now() - VERIFICATION_TTL * 1000).first();
     
     return result || null;
   }
@@ -266,7 +266,7 @@ class Database {
     return !!result;
   }
 
-  async setVerified(userId, expirationTtl = 259200) {
+  async setVerified(userId, expirationTtl = VERIFIED_TTL) {
     const expiryTime = Date.now() + (expirationTtl * 1000);
     await this.d1.prepare(
       'INSERT OR REPLACE INTO verified_users (user_id, expiry_time) VALUES (?, ?)'
@@ -451,7 +451,8 @@ function ensureBotCommands() {
   // 管理员专属命令菜单：scope 限定为管理员（ADMIN_UID）单独生效
   const setAdminCommands = requestTelegram('setMyCommands', makeReqBody({
     commands: [
-      { command: 'start', description: '开始使用 / 重新验证' },
+      { command: 'start', description: '开始使用 / 状态检查' },
+      { command: 'info', description: '查询访客状态与 UID (可带 UID)' },
       { command: 'block', description: '屏蔽用户 (可带 UID)' },
       { command: 'unblock', description: '解除屏蔽 (可带 UID)' },
       { command: 'checkblock', description: '查询屏蔽状态 (可带 UID)' },
@@ -477,7 +478,6 @@ async function handleWebhook(request, ctx) {
   
   try {
     const update = await request.json();
-    ctx.waitUntil(ensureBotCommands());       // 异步注册命令菜单，不影响响应
     ctx.waitUntil(onUpdate(update));
     return new Response('Ok');
   } catch (err) {
@@ -490,13 +490,33 @@ async function handleWebhook(request, ctx) {
  * 处理消息
  */
 async function onMessage(message) {
-  // /start 命令
-  if (message.text === '/start') {
-    const chatId = message.chat.id.toString();
-    const verified = await db.isVerified(chatId);
+  // 仅响应私聊消息，忽略群组或频道消息
+  if (!message?.chat || message.chat.type !== 'private') {
+    return;
+  }
 
-    if (verified) {
-      // ✅ 已验证用户：不再展示验证引导
+  const chatId = message.chat.id.toString();
+  const text = message.text || '';
+
+  // /start 命令
+  if (text === '/start') {
+    ensureBotCommands();
+
+    if (chatId === ADMIN_UID) {
+      return sendMessage({
+        chat_id: chatId,
+        text: '<b>👑 管理员你好！</b>机器人运行正常。\n\n你可以直接<b>回复</b>转发来的访客消息进行对话，或使用输入框左侧 <code>/</code> 菜单管理白名单与屏蔽列表。',
+        parse_mode: 'HTML'
+      });
+    }
+
+    const [whitelisted, verified] = await Promise.all([
+      db.isWhitelisted(chatId),
+      db.isVerified(chatId)
+    ]);
+
+    if (whitelisted || verified) {
+      // ✅ 白名单或已验证用户：不再展示验证引导
       return sendMessage({
         chat_id: chatId,
         text: '<b>👋 欢迎回来！</b>你已通过验证，直接发送消息即可和我对话～',
@@ -507,45 +527,52 @@ async function onMessage(message) {
     // 未验证用户：展示验证引导
     return sendMessage({
       chat_id: chatId,
-      text: '<b>👋 你好，欢迎来访！</b>\n\n为过滤广告机器人，请先完成一道简单的数学验证题，通过后你的消息就会直接转达给我。\n\n<i>直接发送任意消息即可开始验证～</i>',
+      text: '<b>👋 你好，欢迎来访！</b>\n\n为过滤广告机器人，请先完成一道简单的验证题，通过后你的消息就会直接转达给我。\n\n<i>直接发送任意消息即可开始验证～</i>',
       parse_mode: 'HTML'
     });
   }
 
   // 管理员命令
-  if (message.chat.id.toString() === ADMIN_UID) {
+  if (chatId === ADMIN_UID) {
+    ensureBotCommands();
+
+    // ✅ 查询访客综合信息
+    if (/^\/info(?:\s+(\d+))?$/.test(text)) {
+      return handleUserInfo(message);
+    }
+
     // ✅ 添加到白名单
-    if (/^\/addwhite(?:\s+(\d+))?$/.test(message.text)) {
+    if (/^\/addwhite(?:\s+(\d+))?$/.test(text)) {
       return handleAddWhitelist(message);
     }
     
     // ✅ 从白名单移除
-    if (/^\/removewhite(?:\s+(\d+))?$/.test(message.text)) {
+    if (/^\/removewhite(?:\s+(\d+))?$/.test(text)) {
       return handleRemoveWhitelist(message);
     }
     
     // ✅ 检查白名单状态
-    if (/^\/checkwhite(?:\s+(\d+))?$/.test(message.text)) {
+    if (/^\/checkwhite(?:\s+(\d+))?$/.test(text)) {
       return handleCheckWhitelist(message);
     }
     
     // ✅ 列出所有白名单
-    if (/^\/listwhite$/.test(message.text)) {
+    if (/^\/listwhite$/.test(text)) {
       return handleListWhitelist(message);
     }
 
     // ✅ 解除屏蔽：支持直接带 UID（不需要回复消息），也可回复转发的消息
-    if (/^\/unblock(?:\s+(\d+))?$/.test(message.text)) {
+    if (/^\/unblock(?:\s+(\d+))?$/.test(text)) {
       return handleUnBlock(message);
     }
 
     // ✅ 屏蔽用户：支持直接带 UID，也可回复转发的消息
-    if (/^\/block(?:\s+(\d+))?$/.test(message.text)) {
+    if (/^\/block(?:\s+(\d+))?$/.test(text)) {
       return handleBlock(message);
     }
 
     // ✅ 检查屏蔽状态：支持直接带 UID，也可回复转发的消息
-    if (/^\/checkblock(?:\s+(\d+))?$/.test(message.text)) {
+    if (/^\/checkblock(?:\s+(\d+))?$/.test(text)) {
       return checkBlock(message);
     }
 
@@ -553,6 +580,7 @@ async function onMessage(message) {
       return sendMessage({
         chat_id: ADMIN_UID,
         text: '使用方法，回复转发的消息，并发送回复消息，或指令:\n' +
+              '/info [UID] - 查询访客状态与 UID\n' +
               '/block [UID] - 屏蔽用户\n' +
               '/unblock [UID] - 解除屏蔽\n' +
               '/checkblock [UID] - 检查屏蔽状态\n' +
@@ -563,12 +591,26 @@ async function onMessage(message) {
       });
     }
 
-    const guestChatId = await db.getMessageMap('msg-map-' + message?.reply_to_message.message_id);
-    return copyMessage({
+    const guestChatId = await db.getMessageMap('msg-map-' + message.reply_to_message.message_id);
+    if (!guestChatId) {
+      return sendMessage({
+        chat_id: ADMIN_UID,
+        text: '⚠️ 未找到该消息对应的访客（请确保回复的是访客转发过来的消息）'
+      });
+    }
+
+    const copyRes = await copyMessage({
       chat_id: guestChatId,
       from_chat_id: message.chat.id,
       message_id: message.message_id
     });
+    if (!copyRes || !copyRes.ok) {
+      return sendMessage({
+        chat_id: ADMIN_UID,
+        text: `❌ 回复发送失败（UID: ${guestChatId}）：对方可能已停用或屏蔽机器人`
+      });
+    }
+    return copyRes;
   }
 
   return handleGuestMessage(message);
@@ -579,7 +621,8 @@ async function onMessage(message) {
  */
 async function getTargetUserId(message) {
   // 优先从命令参数中获取
-  const match = message.text.match(/\/\w+\s+(\d+)/);
+  const text = message.text || '';
+  const match = text.match(/\/\w+\s+(\d+)/);
   if (match) {
     return match[1];
   }
@@ -590,6 +633,43 @@ async function getTargetUserId(message) {
   }
   
   return null;
+}
+
+/**
+ * 查询访客综合信息与状态
+ */
+async function handleUserInfo(message) {
+  const guestChatId = await getTargetUserId(message);
+
+  if (!guestChatId) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '❌ 用法: /info <UID> 或回复一条转发的消息'
+    });
+  }
+
+  const [whitelisted, verified, blocked, cooldownMs, fraud] = await Promise.all([
+    db.isWhitelisted(guestChatId),
+    db.isVerified(guestChatId),
+    db.isBlocked(guestChatId),
+    db.getCooldownRemaining(guestChatId),
+    isFraud(guestChatId)
+  ]);
+
+  const infoText = [
+    '👤 <b>访客状态信息</b>',
+    `• UID: <code>${guestChatId}</code>`,
+    `• 白名单: ${whitelisted ? '✅ 是' : '❌ 否'}`,
+    `• 验证状态: ${whitelisted ? '✅ 免验证 (白名单)' : (verified ? '✅ 已通过验证' : '⏳ 未验证 / 已过期')}`,
+    `• 屏蔽状态: ${blocked ? '⛔ 已永久屏蔽' : (cooldownMs > 0 ? `⏳ 验证冷却中 (剩余 ${Math.ceil(cooldownMs / 1000)} 秒)` : '✅ 正常')}`,
+    `• 诈骗名单: ${fraud ? '⚠️ 命中诈骗数据库' : '✅ 未命中'}`
+  ].join('\n');
+
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: infoText,
+    parse_mode: 'HTML'
+  });
 }
 
 /**
@@ -680,7 +760,8 @@ async function handleListWhitelist(message) {
  */
 async function onCallbackQuery(callbackQuery) {
   try {
-    const userId = callbackQuery.from.id.toString();
+    // 统一使用 chatId 作为键维度，与 onMessage / sendVerification 保持一致
+    const chatId = callbackQuery.message.chat.id.toString();
     const data = callbackQuery.data;
     const messageId = callbackQuery.message.message_id;
 
@@ -692,7 +773,7 @@ async function onCallbackQuery(callbackQuery) {
     const userAnswer = data.replace(/^verify_/, '');
 
     // 从数据库读取当前验证题的正确答案（答案不暴露在按钮数据里）
-    const verState = await db.getVerificationState(userId);
+    const verState = await db.getVerificationState(chatId);
     if (!verState) {
       await requestTelegram('answerCallbackQuery', makeReqBody({
         callback_query_id: callbackQuery.id,
@@ -702,14 +783,41 @@ async function onCallbackQuery(callbackQuery) {
       return;
     }
 
-    if (userAnswer === verState.answer) {
-      await db.setVerified(userId);
-      await db.deleteVerification(userId);
-      
+    const [expectedAnswer, pendingMsgId] = String(verState.answer).split('|');
+
+    if (userAnswer === expectedAnswer) {
+      await db.setVerified(chatId, VERIFIED_TTL);
+      await db.deleteVerification(chatId);
+
+      // 如果有触发验证时的首条待转发消息，验证通过后自动补发给管理员
+      let forwardedFirstMsg = false;
+      if (pendingMsgId) {
+        if (await isFraud(chatId)) {
+          await db.blockUser(chatId);
+          await sendMessage({
+            chat_id: ADMIN_UID,
+            text: `⚠️ 检测到诈骗人员，已自动屏蔽\nUID: ${chatId}`
+          });
+        } else {
+          const forwardReq = await forwardMessage({
+            chat_id: ADMIN_UID,
+            from_chat_id: chatId,
+            message_id: parseInt(pendingMsgId)
+          });
+          if (forwardReq && forwardReq.ok) {
+            forwardedFirstMsg = true;
+            await db.setMessageMap('msg-map-' + forwardReq.result.message_id, chatId);
+            await handleNotify({ chat: { id: chatId } }, chatId);
+          }
+        }
+      }
+
       await requestTelegram('editMessageText', makeReqBody({
-        chat_id: userId,
+        chat_id: chatId,
         message_id: messageId,
-        text: '🎉🎊✨ 验证成功！你现在可以正常和我对话啦～',
+        text: forwardedFirstMsg
+          ? '🎉🎊✨ 验证成功！你刚才发送的消息已自动为你转达，现在可以继续和我对话啦～'
+          : '🎉🎊✨ 验证成功！你现在可以正常和我对话啦～',
         reply_markup: undefined
       }));
     } else {
@@ -718,18 +826,18 @@ async function onCallbackQuery(callbackQuery) {
       
       if (attempts >= MAX_VERIFY_ATTEMPTS) {
         // ✅ 答错次数超标：进入 2 分钟冷却，而非永久屏蔽；冷却结束后可重新验证
-        await db.setCooldown(userId, Date.now() + BLOCK_COOLDOWN_MS);
-        await db.deleteVerification(userId);
+        await db.setCooldown(chatId, Date.now() + BLOCK_COOLDOWN_MS);
+        await db.deleteVerification(chatId);
         
         await requestTelegram('editMessageText', makeReqBody({
-          chat_id: userId,
+          chat_id: chatId,
           message_id: messageId,
           text: '🚫🔥 验证失败次数过多，请 2 分钟后再试～',
           reply_markup: undefined
         }));
       } else {
-        // ✅ 答错后不保留旧题，原地换一道新题（只保留最新）；尝试次数继续累计
-        await sendVerification(userId, attempts, messageId);
+        // ✅ 答错后不保留旧题，原地换一道新题（只保留最新）；尝试次数与待转发首条消息继续保留
+        await sendVerification(chatId, attempts, messageId, pendingMsgId);
         await requestTelegram('answerCallbackQuery', makeReqBody({
           callback_query_id: callbackQuery.id,
           text: `❌ 回答错误 (${attempts}/${MAX_VERIFY_ATTEMPTS})，请重新作答`,
@@ -783,13 +891,10 @@ async function handleGuestMessage(message) {
       return;
     }
 
-    // 检查是否被屏蔽（永久）
+    // 检查是否被屏蔽（永久）：静默忽略，防止被屏蔽者刷屏消耗机器人额度
     const isblocked = await db.isBlocked(chatId);
     if (isblocked) {
-      return sendMessage({
-        chat_id: chatId,
-        text: '⛔ 你已被屏蔽，无法继续使用。如有疑问请联系管理员。'
-      });
+      return;
     }
 
     // 检查是否处于验证冷却期（答错3次后 2 分钟内）
@@ -808,7 +913,7 @@ async function handleGuestMessage(message) {
       const verState = await db.getVerificationState(chatId);
 
       if (!verState) {
-        return sendVerification(chatId, 0);
+        return sendVerification(chatId, 0, null, message.message_id);
       } else {
         return sendMessage({
           chat_id: chatId,
@@ -817,11 +922,12 @@ async function handleGuestMessage(message) {
       }
     }
 
-    // 诈骗检查
+    // 诈骗检查：检测到诈骗人员后自动加入永久屏蔽并通知管理员一次，避免重复报警刷屏
     if (await isFraud(chatId)) {
+      await db.blockUser(chatId);
       return sendMessage({
         chat_id: ADMIN_UID,
-        text: `⚠️ 检测到诈骗人员\nUID: ${chatId}`
+        text: `⚠️ 检测到诈骗人员，已自动屏蔽\nUID: ${chatId}`
       });
     }
 
@@ -842,13 +948,16 @@ async function handleGuestMessage(message) {
 }
 
 /**
- * 生成出一道新验证题并发送（含保存答案与尝试次数）
+ * 生成出一道新验证题并发送（含保存答案、尝试次数及触发验证的首条消息 ID）
  * @param chatId 用户 chat_id
  * @param attempts 本次验证已累计的尝试次数（首次为 0，答错换题时保留累计值）
+ * @param editMessageId 若传入则原地编辑该消息为新题
+ * @param pendingMessageId 触发验证的首条消息 ID，验证成功后自动补发
  */
-async function sendVerification(chatId, attempts, editMessageId) {
+async function sendVerification(chatId, attempts, editMessageId = null, pendingMessageId = null) {
   const { question, answer } = generateMathProblem();
-  await db.setVerification(chatId, answer, attempts);
+  const storedAnswer = pendingMessageId ? `${answer}|${pendingMessageId}` : answer;
+  await db.setVerification(chatId, storedAnswer, attempts);
 
   const options = generateOptions(parseInt(answer));
   const formattedOptions = options.map(opt => String(opt).padStart(2, '0'));
@@ -921,7 +1030,11 @@ async function handleNotify(message, chatId) {
       const lastMsgTime = await db.getLastMessageTime(chatId);
       if (!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL) {
         await db.setLastMessageTime(chatId, Date.now());
-        const notification = await fetch(notificationUrl).then(r => r.text());
+        const res = await fetch(notificationUrl);
+        if (!res.ok) {
+          throw new Error(`拉取通知模板失败: HTTP ${res.status}`);
+        }
+        const notification = await res.text();
         return sendMessage({
           chat_id: ADMIN_UID,
           text: notification
@@ -1023,14 +1136,18 @@ async function isFraud(id) {
   try {
     const now = Date.now();
     if (!fraudCache || now - fraudCacheTime > FRAUD_CACHE_TTL) {
-      const db_list = await fetch(fraudDb).then(r => r.text());
+      const res = await fetch(fraudDb);
+      if (!res.ok) {
+        throw new Error(`拉取诈骗名单失败: HTTP ${res.status}`);
+      }
+      const db_list = await res.text();
       fraudCache = db_list.split('\n').filter(v => v.trim());
       fraudCacheTime = now;
     }
     return fraudCache.some(v => v.trim() === id.toString());
   } catch (err) {
     console.error('检查诈骗列表错误:', err);
-    return false;
+    return fraudCache ? fraudCache.some(v => v.trim() === id.toString()) : false;
   }
 }
 
@@ -1040,15 +1157,18 @@ async function isFraud(id) {
 async function registerWebhook(requestUrl) {
   try {
     const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${WEBHOOK}`;
-    const r = await fetch(apiUrl('setWebhook'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        url: webhookUrl,
-        secret_token: SECRET,
-        allowed_updates: ['message', 'callback_query']
-      })
-    }).then(r => r.json());
+    const [r] = await Promise.all([
+      fetch(apiUrl('setWebhook'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          url: webhookUrl,
+          secret_token: SECRET,
+          allowed_updates: ['message', 'callback_query']
+        })
+      }).then(r => r.json()),
+      ensureBotCommands()
+    ]);
     
     return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2));
   } catch (err) {
@@ -1115,7 +1235,7 @@ async function initDatabase(d1) {
     // 创建索引
     'CREATE INDEX IF NOT EXISTS idx_verification_created ON verification(created_at)',
     'CREATE INDEX IF NOT EXISTS idx_verified_expiry ON verified_users(expiry_time)',
-    'CREATE INDEX IF NOT EXISTS idx_mappings_key ON message_mappings(mapping_key)'
+    'CREATE INDEX IF NOT EXISTS idx_mappings_created ON message_mappings(created_at)'
   ];
 
   try {
