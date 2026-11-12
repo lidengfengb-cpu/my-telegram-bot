@@ -273,6 +273,12 @@ class Database {
     ).bind(userId.toString(), expiryTime).run();
   }
 
+  async deleteVerified(userId) {
+    await this.d1.prepare(
+      'DELETE FROM verified_users WHERE user_id = ?'
+    ).bind(userId.toString()).run();
+  }
+
   // 屏蔽用户操作
   async isBlocked(userId) {
     const result = await this.d1.prepare(
@@ -299,6 +305,12 @@ class Database {
     await this.d1.prepare(
       'INSERT OR REPLACE INTO verification_cooldowns (user_id, cooldown_until) VALUES (?, ?)'
     ).bind(userId.toString(), untilMs).run();
+  }
+
+  async deleteCooldown(userId) {
+    await this.d1.prepare(
+      'DELETE FROM verification_cooldowns WHERE user_id = ?'
+    ).bind(userId.toString()).run();
   }
 
   async getCooldownRemaining(userId) {
@@ -453,6 +465,7 @@ function ensureBotCommands() {
     commands: [
       { command: 'start', description: '开始使用 / 状态检查' },
       { command: 'info', description: '查询访客状态与 UID (可带 UID)' },
+      { command: 'unverify', description: '重置访客验证状态 (可带 UID)' },
       { command: 'block', description: '屏蔽用户 (可带 UID)' },
       { command: 'unblock', description: '解除屏蔽 (可带 UID)' },
       { command: 'checkblock', description: '查询屏蔽状态 (可带 UID)' },
@@ -541,6 +554,11 @@ async function onMessage(message) {
       return handleUserInfo(message);
     }
 
+    // ✅ 重置访客验证状态（使其下次发消息重新触发验证）
+    if (/^\/unverify(?:\s+(\d+))?$/.test(text)) {
+      return handleUnverify(message);
+    }
+
     // ✅ 添加到白名单
     if (/^\/addwhite(?:\s+(\d+))?$/.test(text)) {
       return handleAddWhitelist(message);
@@ -581,6 +599,7 @@ async function onMessage(message) {
         chat_id: ADMIN_UID,
         text: '使用方法，回复转发的消息，并发送回复消息，或指令:\n' +
               '/info [UID] - 查询访客状态与 UID\n' +
+              '/unverify [UID] - 重置访客验证状态\n' +
               '/block [UID] - 屏蔽用户\n' +
               '/unblock [UID] - 解除屏蔽\n' +
               '/checkblock [UID] - 检查屏蔽状态\n' +
@@ -669,6 +688,51 @@ async function handleUserInfo(message) {
     chat_id: ADMIN_UID,
     text: infoText,
     parse_mode: 'HTML'
+  });
+}
+
+/**
+ * 重置访客验证状态（清除已验证记录、进行中题目及冷却期）
+ */
+async function handleUnverify(message) {
+  const guestChatId = await getTargetUserId(message);
+
+  if (!guestChatId) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '❌ 用法: /unverify <UID> 或回复一条转发的消息'
+    });
+  }
+
+  if (guestChatId === ADMIN_UID) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '管理员无需验证'
+    });
+  }
+
+  await Promise.all([
+    db.deleteVerified(guestChatId),
+    db.deleteVerification(guestChatId),
+    db.deleteCooldown(guestChatId)
+  ]);
+
+  const [whitelisted, blocked] = await Promise.all([
+    db.isWhitelisted(guestChatId),
+    db.isBlocked(guestChatId)
+  ]);
+
+  let reply = `✅ UID: ${guestChatId} 已重置验证状态，下次发消息将重新触发验证`;
+  if (whitelisted) {
+    reply += '\n⚠️ 注意：该用户当前在白名单中，仍会跳过验证（如需测试验证请先 /removewhite）';
+  }
+  if (blocked) {
+    reply += '\n⚠️ 注意：该用户当前已被永久屏蔽（如需恢复使用请先 /unblock）';
+  }
+
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: reply
   });
 }
 
